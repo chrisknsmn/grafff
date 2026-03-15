@@ -7,12 +7,13 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
-import { Settings } from "lucide-react-native";
+import { Settings, Eye } from "lucide-react-native";
 import * as Location from "expo-location";
 import { supabase } from "../lib/supabase";
 import MapViewLeaflet, {
   MapViewLeafletHandle,
 } from "../components/MapViewLeaflet";
+import BuildingScene from "./BuildingScene";
 
 const LEAFLET_HTML = `
 <!DOCTYPE html>
@@ -24,6 +25,7 @@ const LEAFLET_HTML = `
 <style>
   * { margin: 0; padding: 0; }
   html, body, #map { width: 100%; height: 100%; }
+  .grid-container { transition: opacity 0.4s ease; }
 </style>
 </head>
 <body>
@@ -43,7 +45,13 @@ const LEAFLET_HTML = `
     maxZoom: 19
   }).addTo(map);
 
-  var gridLayer = L.layerGroup().addTo(map);
+  map.createPane('gridPane');
+  map.getPane('gridPane').classList.add('grid-container');
+  map.getPane('gridPane').style.opacity = '0';
+
+  var gridLayer = L.layerGroup({ pane: 'gridPane' }).addTo(map);
+  var gridShowing = false;
+
   var selectedRect = null;
   var selectedKey = null;
 
@@ -64,18 +72,22 @@ const LEAFLET_HTML = `
     var bounds = map.getBounds();
     var latDelta = bounds.getNorth() - bounds.getSouth();
     var lngDelta = bounds.getEast() - bounds.getWest();
+    var shouldShow = latDelta <= MAX_DELTA_FOR_GRID && lngDelta <= MAX_DELTA_FOR_GRID;
 
-    if (latDelta > MAX_DELTA_FOR_GRID || lngDelta > MAX_DELTA_FOR_GRID) {
-      sendMessage({ type: 'gridVisible', visible: false });
-      return;
+    if (shouldShow !== gridShowing) {
+      gridShowing = shouldShow;
+      map.getPane('gridPane').style.opacity = shouldShow ? '1' : '0';
+      sendMessage({ type: 'gridVisible', visible: shouldShow });
     }
 
-    sendMessage({ type: 'gridVisible', visible: true });
+    if (!shouldShow) return;
 
-    var south = bounds.getSouth();
-    var north = bounds.getNorth();
-    var west = bounds.getWest();
-    var east = bounds.getEast();
+    var bufferLat = (bounds.getNorth() - bounds.getSouth()) * 0.5;
+    var bufferLng = (bounds.getEast() - bounds.getWest()) * 0.5;
+    var south = bounds.getSouth() - bufferLat;
+    var north = bounds.getNorth() + bufferLat;
+    var west = bounds.getWest() - bufferLng;
+    var east = bounds.getEast() + bufferLng;
 
     var startLat = Math.floor(south / GRID_SIZE) * GRID_SIZE;
     var startLng = Math.floor(west / GRID_SIZE) * GRID_SIZE;
@@ -167,6 +179,7 @@ export default function HomeScreen() {
   const mapRef = useRef<MapViewLeafletHandle>(null);
   const [selectedCell, setSelectedCell] = useState<string | null>(null);
   const [showGrid, setShowGrid] = useState(true);
+  const [viewing3D, setViewing3D] = useState<string | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -243,12 +256,31 @@ export default function HomeScreen() {
       {selectedCell && (
         <View style={styles.selectionBanner}>
           <Text style={styles.selectionText}>1 section selected</Text>
-          <TouchableOpacity
-            style={styles.clearButton}
-            onPress={handleClearSelection}
-          >
-            <Text style={styles.clearButtonText}>Clear</Text>
-          </TouchableOpacity>
+          <View style={styles.selectionActions}>
+            <TouchableOpacity
+              style={styles.view3DButton}
+              onPress={() => setViewing3D(selectedCell)}
+            >
+              <Eye size={14} color="#fff" />
+              <Text style={styles.view3DButtonText}>View 3D</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.clearButton}
+              onPress={handleClearSelection}
+            >
+              <Text style={styles.clearButtonText}>Clear</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      )}
+
+      {/* 3D Building Scene */}
+      {viewing3D && (
+        <View style={StyleSheet.absoluteFill}>
+          <BuildingScene
+            cellKey={viewing3D}
+            onBack={() => setViewing3D(null)}
+          />
         </View>
       )}
 
@@ -360,6 +392,25 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: "600",
     color: "#333",
+  },
+  selectionActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  view3DButton: {
+    backgroundColor: "#007bff",
+    paddingVertical: 6,
+    paddingHorizontal: 14,
+    borderRadius: 6,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+  },
+  view3DButtonText: {
+    color: "#fff",
+    fontSize: 14,
+    fontWeight: "600",
   },
   clearButton: {
     backgroundColor: "#007bff",

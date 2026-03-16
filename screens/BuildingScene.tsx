@@ -78,6 +78,9 @@ function buildSceneHTML(bounds: CellBounds): string {
   <div class="color-swatch" style="background:#222222" data-color="#222222"></div>
   <div class="color-swatch" style="background:#ffffff" data-color="#ffffff"></div>
   <input type="range" id="brushSlider" min="2" max="30" value="8" title="Brush size">
+  <button class="tool-btn active" data-brush="marker" title="Marker">Marker</button>
+  <button class="tool-btn" data-brush="spray" title="Spray">Spray</button>
+  <button class="tool-btn" data-brush="glow" title="Glow">Glow</button>
   <button class="tool-btn" id="undoBtn" disabled>Undo</button>
 </div>
 <script type="importmap">
@@ -285,22 +288,66 @@ function buildSceneHTML(bounds: CellBounds): string {
     return buildingPairs.map(function(bp) { return bp.mesh; }).filter(function(m) { return m.visible; });
   }
 
-  // Create a round decal texture
-  var decalCanvas = document.createElement('canvas');
-  decalCanvas.width = 64;
-  decalCanvas.height = 64;
-  var dctx = decalCanvas.getContext('2d');
-  dctx.beginPath();
-  dctx.arc(32, 32, 30, 0, Math.PI * 2);
-  dctx.fillStyle = '#ffffff';
-  dctx.fill();
-  var decalTex = new THREE.CanvasTexture(decalCanvas);
+  // --- Brush textures ---
+  var brushType = 'marker';
+  var TSIZE = 128;
+
+  function makeBrushCanvas(drawFn) {
+    var c = document.createElement('canvas');
+    c.width = TSIZE; c.height = TSIZE;
+    var ctx = c.getContext('2d');
+    drawFn(ctx, TSIZE);
+    return new THREE.CanvasTexture(c);
+  }
+
+  // Marker: soft feathered circle with radial gradient
+  var markerTex = makeBrushCanvas(function(ctx, s) {
+    var g = ctx.createRadialGradient(s/2, s/2, 0, s/2, s/2, s/2);
+    g.addColorStop(0, 'rgba(255,255,255,1)');
+    g.addColorStop(0.5, 'rgba(255,255,255,0.85)');
+    g.addColorStop(0.8, 'rgba(255,255,255,0.3)');
+    g.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, s, s);
+  });
+
+  // Spray: random scattered dots
+  var sprayTex = makeBrushCanvas(function(ctx, s) {
+    var cx = s/2, cy = s/2, r = s/2;
+    for (var i = 0; i < 200; i++) {
+      var angle = Math.random() * Math.PI * 2;
+      var dist = Math.random() * r;
+      var px = cx + Math.cos(angle) * dist;
+      var py = cy + Math.sin(angle) * dist;
+      var alpha = 1 - (dist / r);
+      ctx.globalAlpha = alpha * (0.3 + Math.random() * 0.7);
+      ctx.beginPath();
+      ctx.arc(px, py, 1 + Math.random() * 2, 0, Math.PI * 2);
+      ctx.fillStyle = '#fff';
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  });
+
+  // Glow: very soft wide falloff
+  var glowTex = makeBrushCanvas(function(ctx, s) {
+    var g = ctx.createRadialGradient(s/2, s/2, 0, s/2, s/2, s/2);
+    g.addColorStop(0, 'rgba(255,255,255,0.9)');
+    g.addColorStop(0.2, 'rgba(255,255,255,0.5)');
+    g.addColorStop(0.5, 'rgba(255,255,255,0.15)');
+    g.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, s, s);
+  });
+
+  var brushTextures = { marker: markerTex, spray: sprayTex, glow: glowTex };
 
   function createDecalMaterial(color) {
     return new THREE.MeshBasicMaterial({
-      map: decalTex,
+      map: brushTextures[brushType],
       color: new THREE.Color(color),
       transparent: true,
+      opacity: brushType === 'glow' ? 0.6 : 0.9,
       depthTest: true,
       depthWrite: false,
       polygonOffset: true,
@@ -308,23 +355,27 @@ function buildSceneHTML(bounds: CellBounds): string {
     });
   }
 
+  var _dummy = new THREE.Object3D();
+
   function placeDecal(hit) {
     var mesh = hit.object;
     var position = hit.point.clone();
     var normal = hit.face.normal.clone();
-
-    // Transform normal to world space
     normal.transformDirection(mesh.matrixWorld);
 
     // Orient decal along surface normal
-    var orientation = new THREE.Euler();
-    var lookTarget = position.clone().add(normal);
-    var dummy = new THREE.Object3D();
-    dummy.position.copy(position);
-    dummy.lookAt(lookTarget);
-    orientation.copy(dummy.rotation);
+    _dummy.position.copy(position);
+    _dummy.lookAt(position.clone().add(normal));
+    var orientation = _dummy.rotation.clone();
+
+    // Spray gets extra randomness
+    if (brushType === 'spray') {
+      orientation.z += (Math.random() - 0.5) * Math.PI;
+    }
 
     var size = brushWorldSize();
+    // Glow is wider
+    if (brushType === 'glow') size *= 1.8;
     var sizeVec = new THREE.Vector3(size, size, size);
 
     var decalGeom = new DecalGeometry(mesh, position, orientation, sizeVec);
@@ -332,6 +383,16 @@ function buildSceneHTML(bounds: CellBounds): string {
     scene.add(decalMesh);
     allDecals.push(decalMesh);
     currentStrokeDecals.push(decalMesh);
+  }
+
+  // Spacing factor per brush type (fraction of brush size between decals)
+  function getSpacing() {
+    switch(brushType) {
+      case 'marker': return 0.15; // very tight for smooth strokes
+      case 'spray': return 0.4;
+      case 'glow': return 0.25;
+      default: return 0.2;
+    }
   }
 
   // --- Toolbar wiring ---
@@ -355,6 +416,14 @@ function buildSceneHTML(bounds: CellBounds): string {
     brushSize = parseInt(this.value);
   });
 
+  document.querySelectorAll('[data-brush]').forEach(function(el) {
+    el.addEventListener('click', function() {
+      document.querySelectorAll('[data-brush]').forEach(function(b) { b.classList.remove('active'); });
+      el.classList.add('active');
+      brushType = el.dataset.brush;
+    });
+  });
+
   document.getElementById('undoBtn').addEventListener('click', function() {
     if (undoStack.length === 0) return;
     var strokeDecals = undoStack.pop();
@@ -375,8 +444,6 @@ function buildSceneHTML(bounds: CellBounds): string {
     return hits.length > 0 ? hits[0] : null;
   }
 
-  var MIN_SPACING = 0.15;
-
   renderer.domElement.addEventListener('pointerdown', function(e) {
     if (!drawMode) return;
     e.preventDefault();
@@ -396,7 +463,7 @@ function buildSceneHTML(bounds: CellBounds): string {
     var hit = hitTest(e.clientX, e.clientY);
     if (hit) {
       // Space decals along the stroke for smooth coverage
-      if (!lastPaintPos || hit.point.distanceTo(lastPaintPos) >= brushWorldSize() * 0.3) {
+      if (!lastPaintPos || hit.point.distanceTo(lastPaintPos) >= brushWorldSize() * getSpacing()) {
         placeDecal(hit);
         lastPaintPos = hit.point.clone();
       }

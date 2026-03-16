@@ -7,7 +7,7 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
-import { Settings, Eye } from "lucide-react-native";
+import { Eye, Settings } from "lucide-react-native";
 import * as Location from "expo-location";
 import { supabase } from "../lib/supabase";
 import MapViewLeaflet, {
@@ -32,6 +32,12 @@ const LEAFLET_HTML = `
 <script>
   var GRID_SIZE = 0.005;
   var MAX_DELTA_FOR_GRID = 0.15;
+  var GRID_COLOR = 'rgba(0, 80, 180, 0.6)';
+  var GRID_FILL = 'rgba(0, 120, 255, 0.05)';
+  var SELECT_COLOR = '#007bff';
+  var SELECT_FILL = 'rgba(0, 123, 255, 0.25)';
+  var FADE_DURATION = 350;
+  var FADE_MAX_DELAY = 300;
 
   var map = L.map('map', {
     center: [40.7128, -74.006],
@@ -49,171 +55,33 @@ const LEAFLET_HTML = `
 
   map.createPane('gridPane');
   var gridPane = map.getPane('gridPane');
-
   var gridLayer = L.layerGroup({ pane: 'gridPane' }).addTo(map);
-  var gridShowing = false;
-  var drawnCells = {};
 
+  var gridShowing = false;
+  var gridFadingOut = false;
+  var drawnCells = {};
+  var zoomingOut = false;
+  var preZoomLevel = map.getZoom();
+  var lastCenter = map.getCenter();
   var selectedRect = null;
   var selectedKey = null;
 
+  function roundCoord(value) {
+    return Math.round(value * 1e6) / 1e6;
+  }
+
+  function snapCoord(value) {
+    return roundCoord(Math.floor(value / GRID_SIZE) * GRID_SIZE);
+  }
+
   function cellKey(lat, lng) {
-    var rLat = Math.round(Math.floor(lat / GRID_SIZE) * GRID_SIZE * 1e6) / 1e6;
-    var rLng = Math.round(Math.floor(lng / GRID_SIZE) * GRID_SIZE * 1e6) / 1e6;
-    return rLat + ',' + rLng;
+    return snapCoord(lat) + ',' + snapCoord(lng);
   }
 
   function cellBounds(lat, lng) {
-    var latStart = Math.round(Math.floor(lat / GRID_SIZE) * GRID_SIZE * 1e6) / 1e6;
-    var lngStart = Math.round(Math.floor(lng / GRID_SIZE) * GRID_SIZE * 1e6) / 1e6;
+    var latStart = snapCoord(lat);
+    var lngStart = snapCoord(lng);
     return [[latStart, lngStart], [latStart + GRID_SIZE, lngStart + GRID_SIZE]];
-  }
-
-  function drawGrid() {
-    var bounds = map.getBounds();
-    var latDelta = bounds.getNorth() - bounds.getSouth();
-    var lngDelta = bounds.getEast() - bounds.getWest();
-    var shouldShow = latDelta <= MAX_DELTA_FOR_GRID && lngDelta <= MAX_DELTA_FOR_GRID;
-
-    if (shouldShow !== gridShowing) {
-      gridShowing = shouldShow;
-      sendMessage({ type: 'gridVisible', visible: shouldShow });
-      if (!shouldShow) {
-        // Fade out cells from outside in (reverse radiate)
-        var fadeCenter = map.getCenter();
-        var fadeKeys = Object.keys(drawnCells);
-        var fadeCells = [];
-        var fadeMaxDist = 0;
-        for (var fi = 0; fi < fadeKeys.length; fi++) {
-          var fk = fadeKeys[fi];
-          var parts = fk.split(',');
-          var cLat = parseFloat(parts[0]) + GRID_SIZE / 2;
-          var cLng = parseFloat(parts[1]) + GRID_SIZE / 2;
-          var fd = Math.sqrt(Math.pow(cLat - fadeCenter.lat, 2) + Math.pow(cLng - fadeCenter.lng, 2));
-          if (fd > fadeMaxDist) fadeMaxDist = fd;
-          fadeCells.push({ key: fk, rect: drawnCells[fk], dist: fd });
-        }
-        var fadeMaxDelay = 300;
-        for (var fi = 0; fi < fadeCells.length; fi++) {
-          var el = fadeCells[fi].rect.getElement();
-          if (el) {
-            el.style.transition = 'opacity 0.35s ease';
-            // Outer cells fade first (delay 0), inner cells fade last
-            var delay = fadeMaxDist > 0 ? Math.round(((fadeMaxDist - fadeCells[fi].dist) / fadeMaxDist) * fadeMaxDelay) : 0;
-            (function(element, d) {
-              setTimeout(function() {
-                element.style.opacity = '0';
-              }, d);
-            })(el, delay);
-          }
-        }
-        // Clear after all animations finish
-        var totalFadeTime = fadeMaxDelay + 400;
-        setTimeout(function() {
-          if (!gridShowing) {
-            gridLayer.clearLayers();
-            drawnCells = {};
-          }
-        }, totalFadeTime);
-      }
-    }
-
-    if (!shouldShow) return;
-
-    var bufferLat = latDelta * 0.5;
-    var bufferLng = lngDelta * 0.5;
-    var south = bounds.getSouth() - bufferLat;
-    var north = bounds.getNorth() + bufferLat;
-    var west = bounds.getWest() - bufferLng;
-    var east = bounds.getEast() + bufferLng;
-
-    var startLat = Math.floor(south / GRID_SIZE) * GRID_SIZE;
-    var startLng = Math.floor(west / GRID_SIZE) * GRID_SIZE;
-
-    var cellStyle = { color: 'rgba(0, 80, 180, 0.6)', weight: 1, fillColor: 'rgba(0, 120, 255, 0.05)', fillOpacity: 1 };
-
-    var center = map.getCenter();
-    var centerLat = center.lat;
-    var centerLng = center.lng;
-
-    // Track which cells should be visible
-    var needed = {};
-    var newCells = [];
-    for (var lat = startLat; lat < north; lat += GRID_SIZE) {
-      for (var lng = startLng; lng < east; lng += GRID_SIZE) {
-        var rLat = Math.round(lat * 1e6) / 1e6;
-        var rLng = Math.round(lng * 1e6) / 1e6;
-        var key = rLat + ',' + rLng;
-        needed[key] = true;
-        if (!drawnCells[key]) {
-          var rect = L.rectangle([[rLat, rLng], [rLat + GRID_SIZE, rLng + GRID_SIZE]], cellStyle).addTo(gridLayer);
-          drawnCells[key] = rect;
-          var cellCenterLat = rLat + GRID_SIZE / 2;
-          var cellCenterLng = rLng + GRID_SIZE / 2;
-          var dist = Math.sqrt(Math.pow(cellCenterLat - centerLat, 2) + Math.pow(cellCenterLng - centerLng, 2));
-          newCells.push({ rect: rect, dist: dist });
-        }
-      }
-    }
-
-    // Fade in new cells radiating from center outward
-    if (newCells.length > 0) {
-      var maxDist = 0;
-      for (var i = 0; i < newCells.length; i++) {
-        if (newCells[i].dist > maxDist) maxDist = newCells[i].dist;
-      }
-      var maxDelay = 300; // ms for outermost cells
-      for (var i = 0; i < newCells.length; i++) {
-        var el = newCells[i].rect.getElement();
-        if (el) {
-          el.style.opacity = '0';
-          el.style.transition = 'opacity 0.35s ease';
-          var delay = maxDist > 0 ? Math.round((newCells[i].dist / maxDist) * maxDelay) : 0;
-          (function(element, d) {
-            setTimeout(function() {
-              element.style.opacity = '1';
-            }, d);
-          })(el, delay);
-        }
-      }
-    }
-
-    // Remove cells that scrolled out of the buffered area
-    for (var key in drawnCells) {
-      if (!needed[key]) {
-        gridLayer.removeLayer(drawnCells[key]);
-        delete drawnCells[key];
-      }
-    }
-  }
-
-  function selectCell(lat, lng) {
-    var key = cellKey(lat, lng);
-    if (selectedKey === key) {
-      clearSelection();
-      return;
-    }
-    if (selectedRect) {
-      map.removeLayer(selectedRect);
-    }
-    var b = cellBounds(lat, lng);
-    selectedRect = L.rectangle(b, {
-      color: '#007bff',
-      weight: 2,
-      fillColor: 'rgba(0, 123, 255, 0.25)',
-      fillOpacity: 0.25
-    }).addTo(map);
-    selectedKey = key;
-    sendMessage({ type: 'cellSelected', key: key, bounds: b });
-  }
-
-  function clearSelection() {
-    if (selectedRect) {
-      map.removeLayer(selectedRect);
-      selectedRect = null;
-    }
-    selectedKey = null;
-    sendMessage({ type: 'cellCleared' });
   }
 
   function sendMessage(obj) {
@@ -225,22 +93,254 @@ const LEAFLET_HTML = `
     }
   }
 
-  map.on('moveend', drawGrid);
-  map.on('zoomend', drawGrid);
-  map.on('zoom', drawGrid);
+  function setGridVisible(visible) {
+    if (visible !== gridShowing) {
+      gridShowing = visible;
+      sendMessage({ type: 'gridVisible', visible: visible });
+    }
+  }
 
-  map.on('click', function(e) {
+  function clearGrid() {
+    gridLayer.clearLayers();
+    drawnCells = {};
+  }
+
+  function getMapDeltaState() {
     var bounds = map.getBounds();
     var latDelta = bounds.getNorth() - bounds.getSouth();
     var lngDelta = bounds.getEast() - bounds.getWest();
-    if (latDelta > MAX_DELTA_FOR_GRID || lngDelta > MAX_DELTA_FOR_GRID) return;
-    selectCell(e.latlng.lat, e.latlng.lng);
+    return {
+      bounds: bounds,
+      latDelta: latDelta,
+      lngDelta: lngDelta,
+      inRange: latDelta <= MAX_DELTA_FOR_GRID && lngDelta <= MAX_DELTA_FOR_GRID
+    };
+  }
+
+  function styleFadeInCells(cells) {
+    if (!cells.length) return;
+
+    // Sort by distance so we can stagger cell-by-cell in order
+    cells.sort(function(a, b) { return a.dist - b.dist; });
+
+    var totalStagger = Math.min(cells.length * 15, 600);
+    var perCellDelay = cells.length > 1 ? totalStagger / (cells.length - 1) : 0;
+    var cellFade = 0.18;
+
+    for (var i = 0; i < cells.length; i++) {
+      var el = cells[i].rect.getElement();
+      if (!el) continue;
+
+      el.style.opacity = '0';
+      el.style.transition = 'opacity ' + cellFade + 's ease-out';
+
+      (function(element, d) {
+        setTimeout(function() {
+          element.style.opacity = '1';
+        }, d);
+      })(el, Math.round(i * perCellDelay));
+    }
+  }
+
+  function fadeOutGridFromEdges() {
+    setGridVisible(false);
+    gridFadingOut = true;
+
+    var fadeCenter = map.getCenter();
+    var fadeKeys = Object.keys(drawnCells);
+    var fadeCells = [];
+    var fadeMaxDist = 0;
+
+    for (var i = 0; i < fadeKeys.length; i++) {
+      var key = fadeKeys[i];
+      var parts = key.split(',');
+      var cLat = parseFloat(parts[0]) + GRID_SIZE / 2;
+      var cLng = parseFloat(parts[1]) + GRID_SIZE / 2;
+      var dist = Math.sqrt(Math.pow(cLat - fadeCenter.lat, 2) + Math.pow(cLng - fadeCenter.lng, 2));
+
+      if (dist > fadeMaxDist) fadeMaxDist = dist;
+      fadeCells.push({ rect: drawnCells[key], dist: dist });
+    }
+
+    for (var i = 0; i < fadeCells.length; i++) {
+      var el = fadeCells[i].rect.getElement();
+      if (!el) continue;
+      el.style.transition = 'none';
+      el.style.opacity = '1';
+    }
+
+    gridPane.style.display = '';
+
+    requestAnimationFrame(function() {
+      for (var i = 0; i < fadeCells.length; i++) {
+        var el = fadeCells[i].rect.getElement();
+        if (!el) continue;
+
+        el.style.transition = 'opacity ' + (FADE_DURATION / 1000) + 's ease';
+
+        var delay = fadeMaxDist > 0
+          ? Math.round(((fadeMaxDist - fadeCells[i].dist) / fadeMaxDist) * FADE_MAX_DELAY)
+          : 0;
+
+        (function(element, d) {
+          setTimeout(function() {
+            element.style.opacity = '0';
+          }, d);
+        })(el, delay);
+      }
+
+      setTimeout(function() {
+        clearGrid();
+        gridFadingOut = false;
+      }, FADE_MAX_DELAY + FADE_DURATION + 50);
+    });
+  }
+
+  function drawGrid() {
+    var state = getMapDeltaState();
+    var bounds = state.bounds;
+    var shouldShow = state.inRange;
+
+    setGridVisible(shouldShow);
+    if (!shouldShow) {
+      if (!gridFadingOut) clearGrid();
+      return;
+    }
+
+    var bufferLat = state.latDelta * 0.05;
+    var bufferLng = state.lngDelta * 0.05;
+    var south = bounds.getSouth() - bufferLat;
+    var north = bounds.getNorth() + bufferLat;
+    var west = bounds.getWest() - bufferLng;
+    var east = bounds.getEast() + bufferLng;
+
+    var startLat = Math.floor(south / GRID_SIZE) * GRID_SIZE;
+    var startLng = Math.floor(west / GRID_SIZE) * GRID_SIZE;
+
+    var center = map.getCenter();
+    // Determine drag direction: new cells appear on the opposite side
+    // Use lastCenter as the origin so cells closest to where we came from fade in first
+    var dragOriginLat = lastCenter.lat;
+    var dragOriginLng = lastCenter.lng;
+    lastCenter = center;
+
+    var needed = {};
+    var newCells = [];
+    var cellStyle = {
+      color: GRID_COLOR,
+      weight: 1,
+      fillColor: GRID_FILL,
+      fillOpacity: 1
+    };
+
+    for (var lat = startLat; lat < north; lat += GRID_SIZE) {
+      for (var lng = startLng; lng < east; lng += GRID_SIZE) {
+        var rLat = roundCoord(lat);
+        var rLng = roundCoord(lng);
+        var key = rLat + ',' + rLng;
+
+        needed[key] = true;
+        if (drawnCells[key]) continue;
+
+        var rect = L.rectangle(
+          [[rLat, rLng], [rLat + GRID_SIZE, rLng + GRID_SIZE]],
+          cellStyle
+        ).addTo(gridLayer);
+
+        drawnCells[key] = rect;
+
+        var cellCenterLat = rLat + GRID_SIZE / 2;
+        var cellCenterLng = rLng + GRID_SIZE / 2;
+        // Distance from the drag origin — cells nearest to where we
+        // came from (existing cells) get the shortest delay
+        var dist = Math.sqrt(
+          Math.pow(cellCenterLat - dragOriginLat, 2) +
+          Math.pow(cellCenterLng - dragOriginLng, 2)
+        );
+
+        newCells.push({ rect: rect, dist: dist });
+      }
+    }
+
+    styleFadeInCells(newCells);
+
+    for (var key in drawnCells) {
+      if (!needed[key]) {
+        gridLayer.removeLayer(drawnCells[key]);
+        delete drawnCells[key];
+      }
+    }
+  }
+
+  function clearSelection() {
+    if (selectedRect) {
+      map.removeLayer(selectedRect);
+      selectedRect = null;
+    }
+    selectedKey = null;
+    sendMessage({ type: 'cellCleared' });
+  }
+
+  function selectCell(lat, lng) {
+    var key = cellKey(lat, lng);
+    if (selectedKey === key) return clearSelection();
+
+    if (selectedRect) map.removeLayer(selectedRect);
+
+    var bounds = cellBounds(lat, lng);
+    selectedRect = L.rectangle(bounds, {
+      color: SELECT_COLOR,
+      weight: 2,
+      fillColor: SELECT_FILL,
+      fillOpacity: 0.25
+    }).addTo(map);
+
+    selectedKey = key;
+    sendMessage({ type: 'cellSelected', key: key, bounds: bounds });
+  }
+
+  new MutationObserver(function() {
+    var svgs = gridPane.querySelectorAll('.leaflet-zoom-animated');
+    for (var i = 0; i < svgs.length; i++) {
+      svgs[i].classList.remove('leaflet-zoom-animated');
+    }
+  }).observe(gridPane, { childList: true, subtree: true });
+
+  map.on('zoomstart', function() {
+    preZoomLevel = map.getZoom();
+    if (gridShowing && !gridFadingOut) {
+      zoomingOut = true;
+      gridPane.style.display = 'none';
+    }
   });
 
-  drawGrid();
+  map.on('zoomend', function() {
+    if (!zoomingOut) return;
+    zoomingOut = false;
 
-  document.addEventListener('message', handleExternalMessage);
-  window.addEventListener('message', handleExternalMessage);
+    var cur = map.getZoom();
+    if (cur >= preZoomLevel) {
+      gridPane.style.display = '';
+      drawGrid();
+      return;
+    }
+
+    if (getMapDeltaState().inRange) {
+      gridPane.style.display = '';
+      drawGrid();
+      return;
+    }
+
+    fadeOutGridFromEdges();
+  });
+
+  map.on('moveend', drawGrid);
+  map.on('zoomend', drawGrid);
+
+  map.on('click', function(e) {
+    if (!getMapDeltaState().inRange) return;
+    selectCell(e.latlng.lat, e.latlng.lng);
+  });
 
   function handleExternalMessage(e) {
     try {
@@ -250,75 +350,100 @@ const LEAFLET_HTML = `
       } else if (msg.type === 'clearSelection') {
         clearSelection();
       }
-    } catch(err) {}
+    } catch (err) {}
   }
+
+  document.addEventListener('message', handleExternalMessage);
+  window.addEventListener('message', handleExternalMessage);
+
+  drawGrid();
 <\/script>
 </body>
 </html>
 `;
 
+const MENU_HEIGHT = 50;
+const MENU_DURATION = 200;
+const MAP_ZOOM_LOCATION = 14;
+
 export default function HomeScreen() {
-  const [menuOpen, setMenuOpen] = useState(false);
-  const [slideAnim] = useState(() => new Animated.Value(0));
   const mapRef = useRef<MapViewLeafletHandle>(null);
+  const slideAnim = useRef(new Animated.Value(0)).current;
+
+  const [menuOpen, setMenuOpen] = useState(false);
   const [selectedCell, setSelectedCell] = useState<string | null>(null);
   const [showGrid, setShowGrid] = useState(true);
   const [viewing3D, setViewing3D] = useState<string | null>(null);
 
   useEffect(() => {
-    (async () => {
+    const setCurrentLocation = async () => {
       const { status } = await Location.requestForegroundPermissionsAsync();
       if (status !== "granted") return;
-      const loc = await Location.getCurrentPositionAsync({});
+
+      const { coords } = await Location.getCurrentPositionAsync({});
       mapRef.current?.postMessage(
         JSON.stringify({
           type: "setLocation",
-          lat: loc.coords.latitude,
-          lng: loc.coords.longitude,
+          lat: coords.latitude,
+          lng: coords.longitude,
+          zoom: MAP_ZOOM_LOCATION,
         })
       );
-    })();
+    };
+
+    setCurrentLocation();
   }, []);
 
-  const toggleMenu = () => {
-    if (menuOpen) {
-      Animated.timing(slideAnim, {
-        toValue: 0,
-        duration: 200,
-        useNativeDriver: false,
-      }).start(() => setMenuOpen(false));
-    } else {
-      setMenuOpen(true);
-      Animated.timing(slideAnim, {
-        toValue: 1,
-        duration: 200,
-        useNativeDriver: false,
-      }).start();
-    }
-  };
+  const animateMenu = useCallback(
+    (open: boolean) => {
+      if (open) setMenuOpen(true);
 
-  const menuHeight = slideAnim.interpolate({
-    inputRange: [0, 1],
-    outputRange: [0, 50],
-  });
+      Animated.timing(slideAnim, {
+        toValue: open ? 1 : 0,
+        duration: MENU_DURATION,
+        useNativeDriver: false,
+      }).start(() => {
+        if (!open) setMenuOpen(false);
+      });
+    },
+    [slideAnim]
+  );
+
+  const toggleMenu = useCallback(() => {
+    animateMenu(!menuOpen);
+  }, [animateMenu, menuOpen]);
 
   const handleMessage = useCallback((data: string) => {
     try {
       const msg = JSON.parse(data);
-      if (msg.type === "cellSelected") {
-        setSelectedCell(msg.key);
-      } else if (msg.type === "cellCleared") {
-        setSelectedCell(null);
-      } else if (msg.type === "gridVisible") {
-        setShowGrid(msg.visible);
+
+      switch (msg.type) {
+        case "cellSelected":
+          setSelectedCell(msg.key);
+          break;
+        case "cellCleared":
+          setSelectedCell(null);
+          break;
+        case "gridVisible":
+          setShowGrid(msg.visible);
+          break;
       }
     } catch {}
   }, []);
 
+  const postToMap = useCallback((message: object) => {
+    mapRef.current?.postMessage(JSON.stringify(message));
+  }, []);
+
   const handleClearSelection = useCallback(() => {
     setSelectedCell(null);
-    mapRef.current?.postMessage(JSON.stringify({ type: "clearSelection" }));
-  }, []);
+    postToMap({ type: "clearSelection" });
+  }, [postToMap]);
+
+  const menuHeight = slideAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0, MENU_HEIGHT],
+  });
 
   return (
     <View style={styles.container}>
@@ -329,36 +454,35 @@ export default function HomeScreen() {
         onMessage={handleMessage}
       />
 
-      {/* Zoom hint banner */}
       {!showGrid && (
         <View style={styles.hintBanner}>
           <Text style={styles.hintText}>Zoom in to see map grid sections</Text>
         </View>
       )}
 
-      {/* Selected cell indicator */}
       {selectedCell && (
         <View style={styles.selectionBanner}>
           <Text style={styles.selectionText}>1 section selected</Text>
+
           <View style={styles.selectionActions}>
             <TouchableOpacity
-              style={styles.view3DButton}
+              style={styles.primaryButton}
               onPress={() => setViewing3D(selectedCell)}
             >
               <Eye size={14} color="#fff" />
-              <Text style={styles.view3DButtonText}>View 3D</Text>
+              <Text style={styles.primaryButtonText}>View 3D</Text>
             </TouchableOpacity>
+
             <TouchableOpacity
-              style={styles.clearButton}
+              style={styles.primaryButton}
               onPress={handleClearSelection}
             >
-              <Text style={styles.clearButtonText}>Clear</Text>
+              <Text style={styles.primaryButtonText}>Clear</Text>
             </TouchableOpacity>
           </View>
         </View>
       )}
 
-      {/* 3D Building Scene */}
       {viewing3D && (
         <View style={StyleSheet.absoluteFill}>
           <BuildingScene
@@ -368,37 +492,40 @@ export default function HomeScreen() {
         </View>
       )}
 
-      {/* Settings gear */}
       <TouchableOpacity style={styles.gearButton} onPress={toggleMenu}>
         <Settings size={24} color="#333" />
       </TouchableOpacity>
 
       {menuOpen && (
-        <Animated.View style={[styles.menu, { height: menuHeight }]}>
-          <TouchableOpacity
-            style={styles.menuItem}
-            onPress={() => supabase.auth.signOut()}
-          >
-            <Text style={styles.menuItemText}>Sign Out</Text>
-          </TouchableOpacity>
-        </Animated.View>
-      )}
+        <>
+          <Animated.View style={[styles.menu, { height: menuHeight }]}>
+            <TouchableOpacity
+              style={styles.menuItem}
+              onPress={() => supabase.auth.signOut()}
+            >
+              <Text style={styles.menuItemText}>Sign Out</Text>
+            </TouchableOpacity>
+          </Animated.View>
 
-      {/* Dismiss menu on map tap */}
-      {menuOpen && (
-        <Pressable style={styles.menuDismiss} onPress={toggleMenu} />
+          <Pressable style={styles.menuDismiss} onPress={toggleMenu} />
+        </>
       )}
     </View>
   );
 }
 
+const sharedShadow = {
+  shadowColor: "#000",
+  shadowOffset: { width: 0, height: 2 },
+  shadowOpacity: 0.15,
+  shadowRadius: 4,
+  elevation: 5,
+};
+
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-  },
-  map: {
-    flex: 1,
-  },
+  container: { flex: 1 },
+  map: { flex: 1 },
+
   gearButton: {
     position: "absolute",
     top: 54,
@@ -413,33 +540,34 @@ const styles = StyleSheet.create({
     shadowRadius: 2,
     elevation: 3,
   },
+
   menu: {
     position: "absolute",
     top: 100,
     right: 16,
-    backgroundColor: "#fff",
-    borderRadius: 8,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.15,
-    shadowRadius: 4,
-    elevation: 5,
-    overflow: "hidden",
     zIndex: 9,
     minWidth: 140,
+    overflow: "hidden",
+    backgroundColor: "#fff",
+    borderRadius: 8,
+    ...sharedShadow,
   },
+
   menuItem: {
     paddingVertical: 14,
     paddingHorizontal: 16,
   },
+
   menuItemText: {
     fontSize: 16,
     color: "#333",
   },
+
   menuDismiss: {
     ...StyleSheet.absoluteFillObject,
     zIndex: 8,
   },
+
   hintBanner: {
     position: "absolute",
     top: 54,
@@ -449,60 +577,55 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     borderRadius: 8,
   },
+
   hintText: {
     color: "#fff",
     fontSize: 13,
     fontWeight: "500",
   },
+
   selectionBanner: {
     position: "absolute",
     bottom: 40,
     left: 16,
     right: 16,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
     backgroundColor: "rgba(255,255,255,0.95)",
     paddingVertical: 12,
     paddingHorizontal: 16,
     borderRadius: 12,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
     shadowColor: "#000",
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.15,
     shadowRadius: 6,
     elevation: 5,
   },
+
   selectionText: {
     fontSize: 15,
     fontWeight: "600",
     color: "#333",
   },
+
   selectionActions: {
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
   },
-  view3DButton: {
-    backgroundColor: "#007bff",
-    paddingVertical: 6,
-    paddingHorizontal: 14,
-    borderRadius: 6,
+
+  primaryButton: {
     flexDirection: "row",
     alignItems: "center",
     gap: 6,
-  },
-  view3DButtonText: {
-    color: "#fff",
-    fontSize: 14,
-    fontWeight: "600",
-  },
-  clearButton: {
     backgroundColor: "#007bff",
     paddingVertical: 6,
     paddingHorizontal: 14,
     borderRadius: 6,
   },
-  clearButtonText: {
+
+  primaryButtonText: {
     color: "#fff",
     fontSize: 14,
     fontWeight: "600",

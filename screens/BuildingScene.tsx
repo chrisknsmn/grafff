@@ -118,6 +118,8 @@ function buildSceneHTML(bounds: CellBounds): string {
   ground.receiveShadow = true;
   scene.add(ground);
 
+  var buildingPairs = [];
+
   // Fetch buildings from Overpass API
   var query = '[out:json][timeout:25];(' +
     'way["building"](' + SOUTH + ',' + WEST + ',' + NORTH + ',' + EAST + ');' +
@@ -186,6 +188,11 @@ function buildSceneHTML(bounds: CellBounds): string {
       var line = new THREE.LineSegments(edges, edgeMat);
       line.rotation.x = -Math.PI / 2;
       scene.add(line);
+
+      // Store mesh + edges pair with a world-space bounding box
+      mesh.updateMatrixWorld(true);
+      var box = new THREE.Box3().setFromObject(mesh);
+      buildingPairs.push({ mesh: mesh, edges: line, box: box });
       count++;
     });
 
@@ -241,6 +248,16 @@ function buildSceneHTML(bounds: CellBounds): string {
   function animate() {
     requestAnimationFrame(animate);
     controls.update();
+
+    // Hide buildings the camera is inside
+    var camPos = camera.position;
+    for (var i = 0; i < buildingPairs.length; i++) {
+      var bp = buildingPairs[i];
+      var inside = bp.box.containsPoint(camPos);
+      bp.mesh.visible = !inside;
+      bp.edges.visible = !inside;
+    }
+
     renderer.render(scene, camera);
   }
   animate();

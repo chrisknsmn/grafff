@@ -40,11 +40,46 @@ function buildSceneHTML(bounds: CellBounds): string {
     font-size: 13px; color: #333; pointer-events: none;
     box-shadow: 0 1px 4px rgba(0,0,0,0.12);
   }
+  #toolbar {
+    position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);
+    display: flex; align-items: center; gap: 10px;
+    background: rgba(255,255,255,0.95); padding: 8px 14px;
+    border-radius: 14px; box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+    z-index: 5; user-select: none; -webkit-user-select: none;
+    font-family: system-ui, sans-serif; font-size: 13px;
+  }
+  #toolbar.drawing { border: 2px solid #e03030; }
+  .tool-btn {
+    padding: 6px 14px; border-radius: 8px; border: 2px solid #ccc;
+    background: #fff; cursor: pointer; font-weight: 600; font-size: 13px;
+    font-family: system-ui, sans-serif; color: #333;
+  }
+  .tool-btn.active { border-color: #e03030; color: #e03030; background: #fff0f0; }
+  .color-swatch {
+    width: 26px; height: 26px; border-radius: 50%; border: 2px solid #ccc;
+    cursor: pointer; box-sizing: border-box;
+  }
+  .color-swatch.selected { border-color: #333; border-width: 3px; }
+  #brushSlider { width: 60px; accent-color: #e03030; }
+  #undoBtn { color: #555; }
+  #undoBtn:disabled { opacity: 0.3; cursor: default; }
 </style>
 </head>
 <body>
 <div id="loading"><div class="spinner"></div><div>Loading buildings...</div></div>
 <div id="info"></div>
+<div id="toolbar">
+  <button class="tool-btn" id="drawToggle">Draw</button>
+  <div class="color-swatch selected" style="background:#e03030" data-color="#e03030"></div>
+  <div class="color-swatch" style="background:#2196f3" data-color="#2196f3"></div>
+  <div class="color-swatch" style="background:#4caf50" data-color="#4caf50"></div>
+  <div class="color-swatch" style="background:#ff9800" data-color="#ff9800"></div>
+  <div class="color-swatch" style="background:#9c27b0" data-color="#9c27b0"></div>
+  <div class="color-swatch" style="background:#222222" data-color="#222222"></div>
+  <div class="color-swatch" style="background:#ffffff" data-color="#ffffff"></div>
+  <input type="range" id="brushSlider" min="2" max="30" value="8" title="Brush size">
+  <button class="tool-btn" id="undoBtn" disabled>Undo</button>
+</div>
 <script type="importmap">
 {
   "imports": {
@@ -56,6 +91,7 @@ function buildSceneHTML(bounds: CellBounds): string {
 <script type="module">
   import * as THREE from 'three';
   import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+  import { DecalGeometry } from 'three/addons/geometries/DecalGeometry.js';
 
   var SOUTH = ${bounds.south};
   var WEST = ${bounds.west};
@@ -126,32 +162,54 @@ function buildSceneHTML(bounds: CellBounds): string {
     'relation["building"](' + SOUTH + ',' + WEST + ',' + NORTH + ',' + EAST + ');' +
     ');out body geom;';
 
+  var overpassServers = [
+    'https://overpass-api.de/api/interpreter',
+    'https://overpass.kumi.systems/api/interpreter',
+    'https://maps.mail.ru/osm/tools/overpass/api/interpreter'
+  ];
+  var serverIndex = 0;
+
   function fetchOverpass(q, retries) {
-    return fetch('https://overpass-api.de/api/interpreter', {
+    var url = overpassServers[serverIndex % overpassServers.length];
+    var statusEl = document.getElementById('loading').querySelector('div:last-child');
+    return fetch(url, {
       method: 'POST',
       body: q,
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
     }).then(function(r) {
-      if (r.status === 429 && retries > 0) {
-        document.getElementById('loading').querySelector('div:last-child').textContent =
-          'Rate limited, retrying...';
+      if ((r.status === 429 || r.status === 504 || r.status === 503) && retries > 0) {
+        serverIndex++;
+        var nextUrl = overpassServers[serverIndex % overpassServers.length];
+        var shortName = nextUrl.split('//')[1].split('/')[0];
+        statusEl.textContent = 'Server busy, trying ' + shortName + '...';
         return new Promise(function(resolve) {
-          setTimeout(resolve, 3000);
+          setTimeout(resolve, 2000);
         }).then(function() {
           return fetchOverpass(q, retries - 1);
         });
       }
       if (!r.ok) throw new Error('Overpass returned ' + r.status);
       return r.json();
+    }).catch(function(err) {
+      if (retries > 0) {
+        serverIndex++;
+        statusEl.textContent = 'Retrying...';
+        return new Promise(function(resolve) {
+          setTimeout(resolve, 2000);
+        }).then(function() {
+          return fetchOverpass(q, retries - 1);
+        });
+      }
+      throw err;
     });
   }
 
-  fetchOverpass(query, 3)
+  var edgeMat = new THREE.LineBasicMaterial({ color: 0x444444 });
+  var buildingMat = new THREE.MeshStandardMaterial({ color: 0xffffff });
+
+  fetchOverpass(query, 6)
   .then(function(data) {
     var buildings = data.elements;
-    var buildingMat = new THREE.MeshStandardMaterial({ color: 0xffffff });
-    var edgeMat = new THREE.LineBasicMaterial({ color: 0x444444 });
-    var highlightMat = new THREE.MeshStandardMaterial({ color: 0xffffff });
 
     var count = 0;
     buildings.forEach(function(bld) {
@@ -162,7 +220,6 @@ function buildSceneHTML(bounds: CellBounds): string {
         return new THREE.Vector2(p.x, p.y);
       });
 
-      // Close the shape if needed
       if (!pts[0].equals(pts[pts.length - 1])) pts.push(pts[0].clone());
 
       var shape = new THREE.Shape(pts);
@@ -189,7 +246,6 @@ function buildSceneHTML(bounds: CellBounds): string {
       line.rotation.x = -Math.PI / 2;
       scene.add(line);
 
-      // Store mesh + edges pair with a world-space bounding box
       mesh.updateMatrixWorld(true);
       var box = new THREE.Box3().setFromObject(mesh);
       buildingPairs.push({ mesh: mesh, edges: line, box: box });
@@ -208,19 +264,176 @@ function buildSceneHTML(bounds: CellBounds): string {
     sendMessage({ type: 'error', message: err.message });
   });
 
-  // Raycaster for building hover/click
+  // --- Decal-based drawing system ---
   var raycaster = new THREE.Raycaster();
   var mouse = new THREE.Vector2();
+  var drawMode = false;
+  var isDrawing = false;
+  var currentColor = '#e03030';
+  var brushSize = 8;
+  var lastPaintPos = null;
+  var allDecals = [];       // every decal mesh in the scene
+  var undoStack = [];        // each entry is an array of decal meshes from one stroke
+  var currentStrokeDecals = [];
 
-  renderer.domElement.addEventListener('click', function(e) {
-    mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
-    mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
+  // Brush size maps from slider (2-30) to world units
+  function brushWorldSize() {
+    return brushSize * 0.08;
+  }
+
+  function getBuildingMeshes() {
+    return buildingPairs.map(function(bp) { return bp.mesh; }).filter(function(m) { return m.visible; });
+  }
+
+  // Create a round decal texture
+  var decalCanvas = document.createElement('canvas');
+  decalCanvas.width = 64;
+  decalCanvas.height = 64;
+  var dctx = decalCanvas.getContext('2d');
+  dctx.beginPath();
+  dctx.arc(32, 32, 30, 0, Math.PI * 2);
+  dctx.fillStyle = '#ffffff';
+  dctx.fill();
+  var decalTex = new THREE.CanvasTexture(decalCanvas);
+
+  function createDecalMaterial(color) {
+    return new THREE.MeshBasicMaterial({
+      map: decalTex,
+      color: new THREE.Color(color),
+      transparent: true,
+      depthTest: true,
+      depthWrite: false,
+      polygonOffset: true,
+      polygonOffsetFactor: -4
+    });
+  }
+
+  function placeDecal(hit) {
+    var mesh = hit.object;
+    var position = hit.point.clone();
+    var normal = hit.face.normal.clone();
+
+    // Transform normal to world space
+    normal.transformDirection(mesh.matrixWorld);
+
+    // Orient decal along surface normal
+    var orientation = new THREE.Euler();
+    var lookTarget = position.clone().add(normal);
+    var dummy = new THREE.Object3D();
+    dummy.position.copy(position);
+    dummy.lookAt(lookTarget);
+    orientation.copy(dummy.rotation);
+
+    var size = brushWorldSize();
+    var sizeVec = new THREE.Vector3(size, size, size);
+
+    var decalGeom = new DecalGeometry(mesh, position, orientation, sizeVec);
+    var decalMesh = new THREE.Mesh(decalGeom, createDecalMaterial(currentColor));
+    scene.add(decalMesh);
+    allDecals.push(decalMesh);
+    currentStrokeDecals.push(decalMesh);
+  }
+
+  // --- Toolbar wiring ---
+  document.getElementById('drawToggle').addEventListener('click', function() {
+    drawMode = !drawMode;
+    this.classList.toggle('active', drawMode);
+    this.textContent = drawMode ? 'Drawing' : 'Draw';
+    document.getElementById('toolbar').classList.toggle('drawing', drawMode);
+    controls.enabled = !drawMode;
+  });
+
+  document.querySelectorAll('.color-swatch').forEach(function(el) {
+    el.addEventListener('click', function() {
+      document.querySelectorAll('.color-swatch').forEach(function(s) { s.classList.remove('selected'); });
+      el.classList.add('selected');
+      currentColor = el.dataset.color;
+    });
+  });
+
+  document.getElementById('brushSlider').addEventListener('input', function() {
+    brushSize = parseInt(this.value);
+  });
+
+  document.getElementById('undoBtn').addEventListener('click', function() {
+    if (undoStack.length === 0) return;
+    var strokeDecals = undoStack.pop();
+    strokeDecals.forEach(function(d) {
+      scene.remove(d);
+      d.geometry.dispose();
+      var idx = allDecals.indexOf(d);
+      if (idx >= 0) allDecals.splice(idx, 1);
+    });
+    document.getElementById('undoBtn').disabled = undoStack.length === 0;
+  });
+
+  function hitTest(x, y) {
+    mouse.x = (x / window.innerWidth) * 2 - 1;
+    mouse.y = -(y / window.innerHeight) * 2 + 1;
     raycaster.setFromCamera(mouse, camera);
-    var meshes = scene.children.filter(function(c) { return c.isMesh && c.userData.tags; });
-    var hits = raycaster.intersectObjects(meshes);
-    if (hits.length > 0) {
-      var tags = hits[0].object.userData.tags;
-      var name = tags.name || 'Building ' + hits[0].object.userData.id;
+    var hits = raycaster.intersectObjects(getBuildingMeshes());
+    return hits.length > 0 ? hits[0] : null;
+  }
+
+  var MIN_SPACING = 0.15;
+
+  renderer.domElement.addEventListener('pointerdown', function(e) {
+    if (!drawMode) return;
+    e.preventDefault();
+    isDrawing = true;
+    lastPaintPos = null;
+    currentStrokeDecals = [];
+    var hit = hitTest(e.clientX, e.clientY);
+    if (hit) {
+      placeDecal(hit);
+      lastPaintPos = hit.point.clone();
+    }
+  });
+
+  renderer.domElement.addEventListener('pointermove', function(e) {
+    if (!drawMode || !isDrawing) return;
+    e.preventDefault();
+    var hit = hitTest(e.clientX, e.clientY);
+    if (hit) {
+      // Space decals along the stroke for smooth coverage
+      if (!lastPaintPos || hit.point.distanceTo(lastPaintPos) >= brushWorldSize() * 0.3) {
+        placeDecal(hit);
+        lastPaintPos = hit.point.clone();
+      }
+    }
+  });
+
+  renderer.domElement.addEventListener('pointerup', function() {
+    if (isDrawing && currentStrokeDecals.length > 0) {
+      undoStack.push(currentStrokeDecals);
+      if (undoStack.length > 30) {
+        var old = undoStack.shift();
+        old.forEach(function(d) { scene.remove(d); d.geometry.dispose(); });
+      }
+      document.getElementById('undoBtn').disabled = false;
+    }
+    isDrawing = false;
+    lastPaintPos = null;
+    currentStrokeDecals = [];
+  });
+
+  renderer.domElement.addEventListener('pointerleave', function() {
+    if (isDrawing && currentStrokeDecals.length > 0) {
+      undoStack.push(currentStrokeDecals);
+      document.getElementById('undoBtn').disabled = false;
+    }
+    isDrawing = false;
+    lastPaintPos = null;
+    currentStrokeDecals = [];
+  });
+
+  // Info on click (only when not drawing)
+  renderer.domElement.addEventListener('click', function(e) {
+    if (drawMode) return;
+    var hit = hitTest(e.clientX, e.clientY);
+    if (hit && hit.object.userData.tags) {
+      var tags = hit.object.userData.tags;
+      var name = tags.name || 'Building ' + hit.object.userData.id;
       var height = tags.height ? tags.height + 'm' : '';
       var type = tags.building !== 'yes' ? tags.building : '';
       var parts = [name, type, height].filter(Boolean);

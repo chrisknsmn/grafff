@@ -48,3 +48,14 @@ npm run web       # Run in browser
 ```
 npx expo start
 ```
+
+## Future: Building Data Pipeline
+
+Currently building data is fetched directly from the Overpass API (OpenStreetMap) at runtime. This works fine during development but won't scale for multiple users due to Overpass rate limits (~2 req/s, ~10k/day).
+
+Before release, build a pipeline to pre-cache building data:
+
+1. Run a background job that pulls building footprints from Overpass into Supabase, cell-by-cell (can run slowly overnight to avoid rate limits)
+2. Store building geometry per grid cell in a Supabase table
+3. Serve building data to players from Supabase instead of Overpass
+4. Optionally pre-process/simplify building geometry for faster 3D rendering

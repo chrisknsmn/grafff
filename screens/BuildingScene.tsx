@@ -108,10 +108,9 @@ function buildSceneHTML(bounds: CellBounds): string {
   sun.shadow.camera.bottom = -200;
   scene.add(sun);
 
-  // Ground plane
-  var groundSize = 500;
+  // Ground disc
   var ground = new THREE.Mesh(
-    new THREE.PlaneGeometry(groundSize, groundSize),
+    new THREE.CircleGeometry(200, 64),
     new THREE.MeshStandardMaterial({ color: 0xd4d8dd })
   );
   ground.rotation.x = -Math.PI / 2;
@@ -173,32 +172,6 @@ function buildSceneHTML(bounds: CellBounds): string {
     document.getElementById('loading').classList.add('hidden');
 
     sendMessage({ type: 'loaded', count: count });
-
-    // Fetch roads
-    var roadQuery = '[out:json][timeout:25];(' +
-      'way["highway"](' + SOUTH + ',' + WEST + ',' + NORTH + ',' + EAST + ');' +
-      ');out body geom;';
-
-    fetch('https://overpass-api.de/api/interpreter', {
-      method: 'POST',
-      body: roadQuery,
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
-    })
-    .then(function(r) { return r.json(); })
-    .then(function(data) {
-      var roadMat = new THREE.LineBasicMaterial({ color: 0x5a6672 });
-      data.elements.forEach(function(road) {
-        if (!road.geometry || road.geometry.length < 2) return;
-        var points = road.geometry.map(function(pt) {
-          var p = project(pt.lat, pt.lon);
-          return new THREE.Vector3(p.x, 0.05, -p.y);
-        });
-        var geom = new THREE.BufferGeometry().setFromPoints(points);
-        var line = new THREE.Line(geom, roadMat);
-        scene.add(line);
-      });
-    })
-    .catch(function(err) { console.error('Road fetch error:', err); });
   })
   .catch(function(err) {
     console.error('Building fetch error:', err);

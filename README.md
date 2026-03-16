@@ -59,3 +59,5 @@ Before release, build a pipeline to pre-cache building data:
 2. Store building geometry per grid cell in a Supabase table
 3. Serve building data to players from Supabase instead of Overpass
 4. Optionally pre-process/simplify building geometry for faster 3D rendering
+
+https://github.com/cartesiancs/map3d

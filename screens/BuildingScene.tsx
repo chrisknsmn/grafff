@@ -92,10 +92,10 @@ function buildSceneHTML(bounds: CellBounds): string {
   controls.maxPolarAngle = Math.PI / 2.1;
 
   // Lighting
-  var ambient = new THREE.AmbientLight(0xffffff, 0.6);
+  var ambient = new THREE.AmbientLight(0xffffff, 2.2);
   scene.add(ambient);
 
-  var sun = new THREE.DirectionalLight(0xffffff, 1.0);
+  var sun = new THREE.DirectionalLight(0xffffff, 0.6);
   sun.position.set(50, 100, 50);
   sun.castShadow = true;
   sun.shadow.mapSize.width = 2048;
@@ -111,7 +111,7 @@ function buildSceneHTML(bounds: CellBounds): string {
   // Ground disc
   var ground = new THREE.Mesh(
     new THREE.CircleGeometry(200, 64),
-    new THREE.MeshStandardMaterial({ color: 0xd4d8dd })
+    new THREE.MeshStandardMaterial({ color: 0x3a3a3a, transparent: true, opacity: 0.65 })
   );
   ground.rotation.x = -Math.PI / 2;
   ground.position.y = -0.1;
@@ -132,8 +132,9 @@ function buildSceneHTML(bounds: CellBounds): string {
   .then(function(r) { return r.json(); })
   .then(function(data) {
     var buildings = data.elements;
-    var buildingMat = new THREE.MeshStandardMaterial({ color: 0x8a9bae });
-    var highlightMat = new THREE.MeshStandardMaterial({ color: 0x007bff });
+    var buildingMat = new THREE.MeshStandardMaterial({ color: 0xffffff });
+    var edgeMat = new THREE.LineBasicMaterial({ color: 0x444444 });
+    var highlightMat = new THREE.MeshStandardMaterial({ color: 0xffffff });
 
     var count = 0;
     buildings.forEach(function(bld) {
@@ -165,6 +166,11 @@ function buildSceneHTML(bounds: CellBounds): string {
       mesh.receiveShadow = true;
       mesh.userData = { tags: bld.tags, id: bld.id };
       scene.add(mesh);
+
+      var edges = new THREE.EdgesGeometry(geom, 15);
+      var line = new THREE.LineSegments(edges, edgeMat);
+      line.rotation.x = -Math.PI / 2;
+      scene.add(line);
       count++;
     });
 

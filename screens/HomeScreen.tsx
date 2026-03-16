@@ -49,8 +49,6 @@ const LEAFLET_HTML = `
 
   map.createPane('gridPane');
   var gridPane = map.getPane('gridPane');
-  gridPane.style.transition = 'opacity 0.4s ease';
-  gridPane.style.opacity = '0';
 
   var gridLayer = L.layerGroup({ pane: 'gridPane' }).addTo(map);
   var gridShowing = false;
@@ -79,16 +77,44 @@ const LEAFLET_HTML = `
 
     if (shouldShow !== gridShowing) {
       gridShowing = shouldShow;
-      gridPane.style.opacity = shouldShow ? '1' : '0';
       sendMessage({ type: 'gridVisible', visible: shouldShow });
       if (!shouldShow) {
-        // Clear cells after fade-out transition finishes
+        // Fade out cells from outside in (reverse radiate)
+        var fadeCenter = map.getCenter();
+        var fadeKeys = Object.keys(drawnCells);
+        var fadeCells = [];
+        var fadeMaxDist = 0;
+        for (var fi = 0; fi < fadeKeys.length; fi++) {
+          var fk = fadeKeys[fi];
+          var parts = fk.split(',');
+          var cLat = parseFloat(parts[0]) + GRID_SIZE / 2;
+          var cLng = parseFloat(parts[1]) + GRID_SIZE / 2;
+          var fd = Math.sqrt(Math.pow(cLat - fadeCenter.lat, 2) + Math.pow(cLng - fadeCenter.lng, 2));
+          if (fd > fadeMaxDist) fadeMaxDist = fd;
+          fadeCells.push({ key: fk, rect: drawnCells[fk], dist: fd });
+        }
+        var fadeMaxDelay = 300;
+        for (var fi = 0; fi < fadeCells.length; fi++) {
+          var el = fadeCells[fi].rect.getElement();
+          if (el) {
+            el.style.transition = 'opacity 0.35s ease';
+            // Outer cells fade first (delay 0), inner cells fade last
+            var delay = fadeMaxDist > 0 ? Math.round(((fadeMaxDist - fadeCells[fi].dist) / fadeMaxDist) * fadeMaxDelay) : 0;
+            (function(element, d) {
+              setTimeout(function() {
+                element.style.opacity = '0';
+              }, d);
+            })(el, delay);
+          }
+        }
+        // Clear after all animations finish
+        var totalFadeTime = fadeMaxDelay + 400;
         setTimeout(function() {
           if (!gridShowing) {
             gridLayer.clearLayers();
             drawnCells = {};
           }
-        }, 450);
+        }, totalFadeTime);
       }
     }
 
@@ -106,8 +132,13 @@ const LEAFLET_HTML = `
 
     var cellStyle = { color: 'rgba(0, 80, 180, 0.6)', weight: 1, fillColor: 'rgba(0, 120, 255, 0.05)', fillOpacity: 1 };
 
+    var center = map.getCenter();
+    var centerLat = center.lat;
+    var centerLng = center.lng;
+
     // Track which cells should be visible
     var needed = {};
+    var newCells = [];
     for (var lat = startLat; lat < north; lat += GRID_SIZE) {
       for (var lng = startLng; lng < east; lng += GRID_SIZE) {
         var rLat = Math.round(lat * 1e6) / 1e6;
@@ -115,7 +146,34 @@ const LEAFLET_HTML = `
         var key = rLat + ',' + rLng;
         needed[key] = true;
         if (!drawnCells[key]) {
-          drawnCells[key] = L.rectangle([[rLat, rLng], [rLat + GRID_SIZE, rLng + GRID_SIZE]], cellStyle).addTo(gridLayer);
+          var rect = L.rectangle([[rLat, rLng], [rLat + GRID_SIZE, rLng + GRID_SIZE]], cellStyle).addTo(gridLayer);
+          drawnCells[key] = rect;
+          var cellCenterLat = rLat + GRID_SIZE / 2;
+          var cellCenterLng = rLng + GRID_SIZE / 2;
+          var dist = Math.sqrt(Math.pow(cellCenterLat - centerLat, 2) + Math.pow(cellCenterLng - centerLng, 2));
+          newCells.push({ rect: rect, dist: dist });
+        }
+      }
+    }
+
+    // Fade in new cells radiating from center outward
+    if (newCells.length > 0) {
+      var maxDist = 0;
+      for (var i = 0; i < newCells.length; i++) {
+        if (newCells[i].dist > maxDist) maxDist = newCells[i].dist;
+      }
+      var maxDelay = 300; // ms for outermost cells
+      for (var i = 0; i < newCells.length; i++) {
+        var el = newCells[i].rect.getElement();
+        if (el) {
+          el.style.opacity = '0';
+          el.style.transition = 'opacity 0.35s ease';
+          var delay = maxDist > 0 ? Math.round((newCells[i].dist / maxDist) * maxDelay) : 0;
+          (function(element, d) {
+            setTimeout(function() {
+              element.style.opacity = '1';
+            }, d);
+          })(el, delay);
         }
       }
     }

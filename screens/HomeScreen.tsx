@@ -37,6 +37,9 @@ const LEAFLET_HTML = `
   var map = L.map('map', {
     center: [40.7128, -74.006],
     zoom: 14,
+    minZoom: 3,
+    maxBoundsViscosity: 1.0,
+    maxBounds: [[-85, -Infinity], [85, Infinity]],
     zoomControl: false,
     attributionControl: false
   });

@@ -124,12 +124,27 @@ function buildSceneHTML(bounds: CellBounds): string {
     'relation["building"](' + SOUTH + ',' + WEST + ',' + NORTH + ',' + EAST + ');' +
     ');out body geom;';
 
-  fetch('https://overpass-api.de/api/interpreter', {
-    method: 'POST',
-    body: query,
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
-  })
-  .then(function(r) { return r.json(); })
+  function fetchOverpass(q, retries) {
+    return fetch('https://overpass-api.de/api/interpreter', {
+      method: 'POST',
+      body: q,
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+    }).then(function(r) {
+      if (r.status === 429 && retries > 0) {
+        document.getElementById('loading').querySelector('div:last-child').textContent =
+          'Rate limited, retrying...';
+        return new Promise(function(resolve) {
+          setTimeout(resolve, 3000);
+        }).then(function() {
+          return fetchOverpass(q, retries - 1);
+        });
+      }
+      if (!r.ok) throw new Error('Overpass returned ' + r.status);
+      return r.json();
+    });
+  }
+
+  fetchOverpass(query, 3)
   .then(function(data) {
     var buildings = data.elements;
     var buildingMat = new THREE.MeshStandardMaterial({ color: 0xffffff });

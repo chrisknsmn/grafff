@@ -25,7 +25,6 @@ const LEAFLET_HTML = `
 <style>
   * { margin: 0; padding: 0; }
   html, body, #map { width: 100%; height: 100%; }
-  .grid-container { transition: opacity 0.4s ease; }
 </style>
 </head>
 <body>
@@ -49,11 +48,13 @@ const LEAFLET_HTML = `
   }).addTo(map);
 
   map.createPane('gridPane');
-  map.getPane('gridPane').classList.add('grid-container');
-  map.getPane('gridPane').style.opacity = '0';
+  var gridPane = map.getPane('gridPane');
+  gridPane.style.transition = 'opacity 0.4s ease';
+  gridPane.style.opacity = '0';
 
   var gridLayer = L.layerGroup({ pane: 'gridPane' }).addTo(map);
   var gridShowing = false;
+  var drawnCells = {};
 
   var selectedRect = null;
   var selectedKey = null;
@@ -71,7 +72,6 @@ const LEAFLET_HTML = `
   }
 
   function drawGrid() {
-    gridLayer.clearLayers();
     var bounds = map.getBounds();
     var latDelta = bounds.getNorth() - bounds.getSouth();
     var lngDelta = bounds.getEast() - bounds.getWest();
@@ -79,14 +79,23 @@ const LEAFLET_HTML = `
 
     if (shouldShow !== gridShowing) {
       gridShowing = shouldShow;
-      map.getPane('gridPane').style.opacity = shouldShow ? '1' : '0';
+      gridPane.style.opacity = shouldShow ? '1' : '0';
       sendMessage({ type: 'gridVisible', visible: shouldShow });
+      if (!shouldShow) {
+        // Clear cells after fade-out transition finishes
+        setTimeout(function() {
+          if (!gridShowing) {
+            gridLayer.clearLayers();
+            drawnCells = {};
+          }
+        }, 450);
+      }
     }
 
     if (!shouldShow) return;
 
-    var bufferLat = (bounds.getNorth() - bounds.getSouth()) * 0.5;
-    var bufferLng = (bounds.getEast() - bounds.getWest()) * 0.5;
+    var bufferLat = latDelta * 0.5;
+    var bufferLng = lngDelta * 0.5;
     var south = bounds.getSouth() - bufferLat;
     var north = bounds.getNorth() + bufferLat;
     var west = bounds.getWest() - bufferLng;
@@ -95,15 +104,28 @@ const LEAFLET_HTML = `
     var startLat = Math.floor(south / GRID_SIZE) * GRID_SIZE;
     var startLng = Math.floor(west / GRID_SIZE) * GRID_SIZE;
 
-    var gridStyle = { color: 'rgba(0, 80, 180, 0.6)', weight: 1 };
+    var cellStyle = { color: 'rgba(0, 80, 180, 0.6)', weight: 1, fillColor: 'rgba(0, 120, 255, 0.05)', fillOpacity: 1 };
 
-    for (var lat = startLat; lat <= north; lat += GRID_SIZE) {
-      var rLat = Math.round(lat * 1e6) / 1e6;
-      L.polyline([[rLat, west], [rLat, east]], gridStyle).addTo(gridLayer);
+    // Track which cells should be visible
+    var needed = {};
+    for (var lat = startLat; lat < north; lat += GRID_SIZE) {
+      for (var lng = startLng; lng < east; lng += GRID_SIZE) {
+        var rLat = Math.round(lat * 1e6) / 1e6;
+        var rLng = Math.round(lng * 1e6) / 1e6;
+        var key = rLat + ',' + rLng;
+        needed[key] = true;
+        if (!drawnCells[key]) {
+          drawnCells[key] = L.rectangle([[rLat, rLng], [rLat + GRID_SIZE, rLng + GRID_SIZE]], cellStyle).addTo(gridLayer);
+        }
+      }
     }
-    for (var lng = startLng; lng <= east; lng += GRID_SIZE) {
-      var rLng = Math.round(lng * 1e6) / 1e6;
-      L.polyline([[south, rLng], [north, rLng]], gridStyle).addTo(gridLayer);
+
+    // Remove cells that scrolled out of the buffered area
+    for (var key in drawnCells) {
+      if (!needed[key]) {
+        gridLayer.removeLayer(drawnCells[key]);
+        delete drawnCells[key];
+      }
     }
   }
 
@@ -147,6 +169,7 @@ const LEAFLET_HTML = `
 
   map.on('moveend', drawGrid);
   map.on('zoomend', drawGrid);
+  map.on('zoom', drawGrid);
 
   map.on('click', function(e) {
     var bounds = map.getBounds();
